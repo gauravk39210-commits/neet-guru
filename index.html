@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEET Guru - Aapka Dost aur Teacher</title>
+<style>
+  :root{--bg:#0f172a;--card:#1e293b;--me:#2563eb;--ai:#334155;--txt:#f1f5f9;--acc:#22c55e}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,"Noto Sans Devanagari",sans-serif;height:100dvh;display:flex;flex-direction:column}
+  header{padding:10px 14px;background:var(--card);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  header h1{font-size:18px;margin:0;flex:1 1 100%}
+  select,button{background:#0b1220;color:var(--txt);border:1px solid #475569;border-radius:10px;padding:8px 10px;font-size:14px}
+  #chat{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+  .msg{max-width:88%;padding:10px 14px;border-radius:14px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+  .me{align-self:flex-end;background:var(--me)}
+  .ai{align-self:flex-start;background:var(--ai)}
+  footer{padding:10px;background:var(--card);display:flex;gap:8px;align-items:center}
+  #text{flex:1;padding:12px;border-radius:12px;border:1px solid #475569;background:#0b1220;color:var(--txt);font-size:15px}
+  #mic{background:var(--acc);color:#04210e;font-weight:700;border:0;width:52px;height:52px;border-radius:50%;font-size:22px}
+  #mic.on{background:#ef4444;color:#fff;animation:p 1s infinite}
+  @keyframes p{50%{transform:scale(1.1)}}
+  #send{background:var(--me);border:0}
+  #status{font-size:12px;opacity:.8;padding:0 14px 4px;min-height:18px}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 6px}
+  .quick button{font-size:12px;padding:6px 10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🩺 NEET Guru – Aapka Dost aur Teacher</h1>
+  <select id="mode">
+    <option value="samjhao">📖 Samjhao (Teacher)</option>
+    <option value="quiz">❓ Quiz (Mujhse sawaal pucho)</option>
+    <option value="doubt">🤔 Doubt Solve</option>
+    <option value="revision">⚡ Quick Revision</option>
+  </select>
+  <select id="cls"><option>Class 11</option><option>Class 12</option></select>
+  <select id="sub"><option>Physics</option><option>Chemistry</option><option>Biology</option></select>
+  <button id="voiceToggle">🔊 Awaaz: ON</button>
+  <button id="hands">🎧 Hands-free: OFF</button>
+  <button id="stop">⏹ Chup</button>
+</header>
+<div id="chat"></div>
+<div class="quick">
+  <button data-q="Mujhe is chapter ka pura concept samjhao: ">Chapter samjhao</button>
+  <button data-q="Mujhse is chapter ke 5 NEET level sawaal pucho, ek ek karke: ">Quiz lo</button>
+  <button data-q="Isko aur simple karke samjhao, example ke saath.">Aur simple</button>
+  <button data-q="Iska short revision notes bana do.">Revision</button>
+</div>
+<div id="status"></div>
+<footer>
+  <button id="mic" title="Bolo">🎤</button>
+  <input id="text" placeholder="Yahan likho ya 🎤 dabake bolo..." autocomplete="off">
+  <button id="send">Bhejo</button>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const chat = $('#chat'), status = $('#status'), text = $('#text');
+let history = [];
+let voiceOn = true, handsFree = false, listening = false, speaking = false, busy = false;
+
+// ---------- UI helpers ----------
+function addMsg(role, t){
+  const d = document.createElement('div');
+  d.className = 'msg ' + (role === 'user' ? 'me' : 'ai');
+  d.textContent = t;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+addMsg('model', 'Namaste! 😊 Main aapka NEET Guru hu. Class aur subject chuno, phir chapter ka naam bolo ya likho — jaise "Cell: The Unit of Life samjhao". 🎤 dabake seedha bol bhi sakte ho!');
+
+// ---------- Text to Speech (Hindi) ----------
+let hiVoice = null;
+function pickVoice(){
+  const v = speechSynthesis.getVoices();
+  hiVoice = v.find(x => x.lang === 'hi-IN') || v.find(x => x.lang.startsWith('hi')) || null;
+}
+if ('speechSynthesis' in window){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+function cleanForSpeech(t){
+  return t.replace(/[*_#`>~|]/g,' ').replace(/\s+/g,' ').trim();
+}
+function chunks(t){
+  const parts = t.match(/[^।.!?\n]+[।.!?\n]?/g) || [t];
+  const out = []; let cur = '';
+  for (const p of parts){
+    if ((cur + p).length > 170){ if (cur) out.push(cur); cur = p; } else cur += p;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+function speak(t, onend){
+  if (!voiceOn || !('speechSynthesis' in window)){ onend && onend(); return; }
+  speechSynthesis.cancel();
+  const list = chunks(cleanForSpeech(t));
+  if (!list.length){ onend && onend(); return; }
+  speaking = true; status.textContent = '🔊 Bol raha hu...';
+  list.forEach((c, i) => {
+    const u = new SpeechSynthesisUtterance(c);
+    u.lang = 'hi-IN'; if (hiVoice) u.voice = hiVoice;
+    u.rate = 0.95; u.pitch = 1;
+    if (i === list.length - 1){
+      u.onend = u.onerror = () => { speaking = false; status.textContent = ''; onend && onend(); };
+    }
+    speechSynthesis.speak(u);
+  });
+}
+
+// ---------- Speech to Text (Hindi) ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+if (SR){
+  rec = new SR();
+  rec.lang = 'hi-IN'; rec.continuous = false; rec.interimResults = true;
+  rec.onresult = e => {
+    let final = '', interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++){
+      const r = e.results[i];
+      if (r.isFinal) final += r[0].transcript; else interim += r[0].transcript;
+    }
+    text.value = final || interim;
+    if (final) { stopListen(); send(); }
+  };
+  rec.onend = () => { listening = false; $('#mic').classList.remove('on'); if (!busy && !speaking && handsFree) startListen(); };
+  rec.onerror = e => { listening = false; $('#mic').classList.remove('on'); if (e.error === 'not-allowed') status.textContent = '⚠️ Mic ki permission do.'; };
+}
+function startListen(){
+  if (!rec || listening || speaking) return;
+  try { rec.start(); listening = true; $('#mic').classList.add('on'); status.textContent = '🎤 Sun raha hu... boliye'; } catch(e){}
+}
+function stopListen(){ if (rec && listening){ try{ rec.stop(); }catch(e){} } }
+
+$('#mic').onclick = () => {
+  if (!SR){ alert('Is browser me voice input nahi hai. Chrome use karo.'); return; }
+  speechSynthesis.cancel(); speaking = false;
+  listening ? stopListen() : startListen();
+};
+
+// ---------- Send to AI ----------
+async function send(){
+  const q = text.value.trim();
+  if (!q || busy) return;
+  text.value = '';
+  addMsg('user', q);
+  history.push({ role: 'user', text: q });
+  busy = true; status.textContent = '🤔 Soch raha hu...';
+  const holder = addMsg('model', '...');
+  try {
+    const r = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: history.slice(-14),
+        mode: $('#mode').value, cls: $('#cls').value, sub: $('#sub').value
+      })
+    });
+    const data = await r.json();
+    const reply = data.reply || ('⚠️ ' + (data.error || 'Kuch gadbad hui, dobara try karo.'));
+    holder.textContent = reply;
+    history.push({ role: 'model', text: reply });
+    busy = false; status.textContent = '';
+    speak(reply, () => { if (handsFree) startListen(); });
+  } catch (e){
+    busy = false; holder.textContent = '⚠️ Internet ya server ki problem. Dobara try karo.'; status.textContent = '';
+  }
+}
+$('#send').onclick = send;
+text.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+// ---------- Controls ----------
+$('#voiceToggle').onclick = e => { voiceOn = !voiceOn; e.target.textContent = '🔊 Awaaz: ' + (voiceOn ? 'ON' : 'OFF'); if (!voiceOn) speechSynthesis.cancel(); };
+$('#hands').onclick = e => {
+  handsFree = !handsFree; e.target.textContent = '🎧 Hands-free: ' + (handsFree ? 'ON' : 'OFF');
+  if (handsFree){ voiceOn = true; $('#voiceToggle').textContent = '🔊 Awaaz: ON'; startListen(); } else stopListen();
+};
+$('#stop').onclick = () => { speechSynthesis.cancel(); speaking = false; status.textContent = ''; };
+document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { text.value = b.dataset.q; text.focus(); });
+</script>
+</body>
+</html>
