@@ -12,7 +12,7 @@
   header h1{font-size:18px;margin:0;flex:1 1 100%}
   select,button{background:#0b1220;color:var(--txt);border:1px solid #475569;border-radius:10px;padding:8px 10px;font-size:14px}
   #chat{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
-  .msg{max-width:88%;padding:10px 14px;border-radius:14px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+  .msg{max-width:88%;padding:10px 14px;border-radius:14px;line-height:1.7;white-space:pre-wrap;word-wrap:break-word;font-size:16px}
   .me{align-self:flex-end;background:var(--me)}
   .ai{align-self:flex-start;background:var(--ai)}
   footer{padding:10px;background:var(--card);display:flex;gap:8px;align-items:center}
@@ -37,6 +37,17 @@
   </select>
   <select id="cls"><option>Class 11</option><option>Class 12</option></select>
   <select id="sub"><option>Physics</option><option>Chemistry</option><option>Biology</option></select>
+  <select id="voice" title="Awaaz chuno">
+    <option value="Charon">🎙 Charon (clear teacher)</option>
+    <option value="Orus">🎙 Orus (strong)</option>
+    <option value="Iapetus">🎙 Iapetus (crisp)</option>
+    <option value="Sadaltager">🎙 Sadaltager (knowledgeable)</option>
+    <option value="Achird">🎙 Achird (friendly)</option>
+  </select>
+  <select id="speed" title="Bolne ki speed">
+    <option value="slow">🐢 Dheere</option>
+    <option value="normal">🙂 Normal</option>
+  </select>
   <button id="voiceToggle">🔊 Awaaz: ON</button>
   <button id="hands">🎧 Hands-free: OFF</button>
   <button id="stop">⏹ Chup</button>
@@ -60,8 +71,9 @@ const $ = s => document.querySelector(s);
 const chat = $('#chat'), status = $('#status'), text = $('#text');
 let history = [];
 let voiceOn = true, handsFree = false, listening = false, speaking = false, busy = false;
+let playToken = 0, fellBack = false;
+const audioEl = new Audio();
 
-// ---------- UI helpers ----------
 function addMsg(role, t){
   const d = document.createElement('div');
   d.className = 'msg ' + (role === 'user' ? 'me' : 'ai');
@@ -70,43 +82,84 @@ function addMsg(role, t){
   chat.scrollTop = chat.scrollHeight;
   return d;
 }
-addMsg('model', 'Namaste! 😊 Main aapka NEET Guru hu. Class aur subject chuno, phir chapter ka naam bolo ya likho — jaise "Cell: The Unit of Life samjhao". 🎤 dabake seedha bol bhi sakte ho!');
+addMsg('model', 'नमस्ते! 😊 मैं आपका NEET Guru हूँ। Class और subject चुनो, फिर chapter का नाम बोलो या लिखो, जैसे "Cell: The Unit of Life समझाओ"। 🎤 दबाकर सीधे बोल भी सकते हो!');
 
-// ---------- Text to Speech (Hindi) ----------
-let hiVoice = null;
-function pickVoice(){
-  const v = speechSynthesis.getVoices();
-  hiVoice = v.find(x => x.lang === 'hi-IN') || v.find(x => x.lang.startsWith('hi')) || null;
-}
-if ('speechSynthesis' in window){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-
+// ---------- Text cleanup & splitting ----------
 function cleanForSpeech(t){
-  return t.replace(/[*_#`>~|]/g,' ').replace(/\s+/g,' ').trim();
+  return t.replace(/[*_#`>~|]/g,' ').replace(/^\s*[-•]\s+/gm,'').replace(/\s+/g,' ').trim();
 }
-function chunks(t){
-  const parts = t.match(/[^।.!?\n]+[।.!?\n]?/g) || [t];
+function splitText(t){
+  const sents = t.match(/[^।.!?\n]+[।.!?\n]?/g) || [t];
   const out = []; let cur = '';
-  for (const p of parts){
-    if ((cur + p).length > 170){ if (cur) out.push(cur); cur = p; } else cur += p;
+  for (const s of sents){
+    const limit = out.length === 0 ? 160 : 420;   // pehla tukda chhota => awaaz jaldi shuru
+    if (cur && (cur + s).length > limit){ out.push(cur.trim()); cur = s; } else cur += s;
   }
-  if (cur) out.push(cur);
+  if (cur.trim()) out.push(cur.trim());
   return out;
 }
-function speak(t, onend){
-  if (!voiceOn || !('speechSynthesis' in window)){ onend && onend(); return; }
-  speechSynthesis.cancel();
-  const list = chunks(cleanForSpeech(t));
-  if (!list.length){ onend && onend(); return; }
-  speaking = true; status.textContent = '🔊 Bol raha hu...';
-  list.forEach((c, i) => {
-    const u = new SpeechSynthesisUtterance(c);
-    u.lang = 'hi-IN'; if (hiVoice) u.voice = hiVoice;
-    u.rate = 0.95; u.pitch = 1;
-    if (i === list.length - 1){
-      u.onend = u.onerror = () => { speaking = false; status.textContent = ''; onend && onend(); };
-    }
+
+// ---------- Gemini voice (server) with browser-voice fallback ----------
+async function fetchAudio(part){
+  try {
+    const style = $('#speed').value === 'slow'
+      ? 'speaking slowly and clearly like a calm, friendly teacher'
+      : 'clear, calm and friendly teacher';
+    const r = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: part, voice: $('#voice').value, style })
+    });
+    if (!r.ok) return null;
+    const b = await r.blob();
+    return URL.createObjectURL(b);
+  } catch(e){ return null; }
+}
+function playUrl(url, token){
+  return new Promise(res => {
+    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); res(); };
+    audioEl.src = url;
+    audioEl.play().catch(() => res());
+  });
+}
+function browserSpeak(t){
+  return new Promise(res => {
+    if (!('speechSynthesis' in window)) return res();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = 'hi-IN'; u.rate = 0.85;
+    const v = speechSynthesis.getVoices().find(x => x.lang === 'hi-IN');
+    if (v) u.voice = v;
+    u.onend = u.onerror = () => res();
     speechSynthesis.speak(u);
   });
+}
+function stopSpeaking(){
+  playToken++;
+  try { audioEl.pause(); } catch(e){}
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  speaking = false; status.textContent = '';
+}
+async function speakReply(reply){
+  if (!voiceOn){ if (handsFree) startListen(); return; }
+  const token = ++playToken;
+  const parts = splitText(cleanForSpeech(reply));
+  if (!parts.length){ if (handsFree) startListen(); return; }
+  speaking = true; status.textContent = '🔊 Awaaz taiyaar ho rahi hai...';
+  let next = fetchAudio(parts[0]);
+  for (let i = 0; i < parts.length; i++){
+    const url = await next;
+    if (token !== playToken) return;
+    if (i + 1 < parts.length) next = fetchAudio(parts[i + 1]); // agla tukda pehle se bana lo => beech me ruk nahi
+    status.textContent = '🔊 Bol raha hu...';
+    if (url){ await playUrl(url, token); }
+    else {
+      if (!fellBack){ fellBack = true; status.textContent = '⚠️ Gemini awaaz abhi busy, phone ki awaaz use ho rahi hai'; }
+      await browserSpeak(parts[i]);
+    }
+    if (token !== playToken) return;
+  }
+  speaking = false; status.textContent = '';
+  if (handsFree) startListen();
 }
 
 // ---------- Speech to Text (Hindi) ----------
@@ -135,7 +188,7 @@ function stopListen(){ if (rec && listening){ try{ rec.stop(); }catch(e){} } }
 
 $('#mic').onclick = () => {
   if (!SR){ alert('Is browser me voice input nahi hai. Chrome use karo.'); return; }
-  speechSynthesis.cancel(); speaking = false;
+  stopSpeaking();
   listening ? stopListen() : startListen();
 };
 
@@ -143,6 +196,7 @@ $('#mic').onclick = () => {
 async function send(){
   const q = text.value.trim();
   if (!q || busy) return;
+  stopSpeaking();
   text.value = '';
   addMsg('user', q);
   history.push({ role: 'user', text: q });
@@ -158,11 +212,16 @@ async function send(){
       })
     });
     const data = await r.json();
+    const isErr = !data.reply;
     const reply = data.reply || ('⚠️ ' + (data.error || 'Kuch gadbad hui, dobara try karo.'));
     holder.textContent = reply;
-    history.push({ role: 'model', text: reply });
     busy = false; status.textContent = '';
-    speak(reply, () => { if (handsFree) startListen(); });
+    if (!isErr){
+      history.push({ role: 'model', text: reply });
+      speakReply(reply);
+    } else {
+      history.pop(); // galat sawaal history se hata do
+    }
   } catch (e){
     busy = false; holder.textContent = '⚠️ Internet ya server ki problem. Dobara try karo.'; status.textContent = '';
   }
@@ -171,13 +230,14 @@ $('#send').onclick = send;
 text.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
 // ---------- Controls ----------
-$('#voiceToggle').onclick = e => { voiceOn = !voiceOn; e.target.textContent = '🔊 Awaaz: ' + (voiceOn ? 'ON' : 'OFF'); if (!voiceOn) speechSynthesis.cancel(); };
+$('#voiceToggle').onclick = e => { voiceOn = !voiceOn; e.target.textContent = '🔊 Awaaz: ' + (voiceOn ? 'ON' : 'OFF'); if (!voiceOn) stopSpeaking(); };
 $('#hands').onclick = e => {
   handsFree = !handsFree; e.target.textContent = '🎧 Hands-free: ' + (handsFree ? 'ON' : 'OFF');
   if (handsFree){ voiceOn = true; $('#voiceToggle').textContent = '🔊 Awaaz: ON'; startListen(); } else stopListen();
 };
-$('#stop').onclick = () => { speechSynthesis.cancel(); speaking = false; status.textContent = ''; };
+$('#stop').onclick = () => stopSpeaking();
 document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { text.value = b.dataset.q; text.focus(); });
 </script>
 </body>
-</html>
+  </html>
+  
