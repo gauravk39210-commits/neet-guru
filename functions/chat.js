@@ -1,5 +1,5 @@
-// Cloudflare Pages Function — is file ko repo me  functions/chat.js  naam se rakhna hai
-// API key yahan nahi likhni. Cloudflare dashboard me GEMINI_API_KEY naam se secret daalna hai.
+// Cloudflare Pages Function — repo me  functions/chat.js  naam se rakhna hai
+// API key yahan nahi likhni. Cloudflare me GEMINI_API_KEY naam se secret daalna hai.
 
 const MODES = {
   samjhao: "Teacher mode: topic ko shuru se, step by step, detail me samjhao. Pehle simple intuition, phir concept, phir daily-life example, phir NEET me kya aata hai (important facts, formulas, exceptions, common galtiyan). End me ek chhota sawaal pucho taaki student ki understanding check ho.",
@@ -8,11 +8,32 @@ const MODES = {
   revision: "Revision mode: topic ke short, point-wise high-yield notes do, important formulas/facts/mnemonics ke saath, jo NEET ke last-minute revision me kaam aayein."
 };
 
+const json = (obj, status = 200) =>
+  new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
+
+async function callGemini(model, key, body, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: ctrl.signal }
+    );
+    const raw = await r.text();
+    let data = null;
+    try { data = JSON.parse(raw); } catch (e) {}
+    return { ok: r.ok, status: r.status, data, raw };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, raw: String(e.message || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function onRequestPost({ request, env }) {
-  const headers = { "Content-Type": "application/json" };
   try {
     if (!env.GEMINI_API_KEY) {
-      return new Response(JSON.stringify({ error: "GEMINI_API_KEY set nahi hai (Cloudflare settings me daalo)." }), { status: 500, headers });
+      return json({ error: "GEMINI_API_KEY set nahi hai (Cloudflare settings me daalo)." }, 500);
     }
     const { messages = [], mode = "samjhao", cls = "Class 11", sub = "Biology" } = await request.json();
 
@@ -26,10 +47,10 @@ Bhasha ke niyam:
 - Technical terms English me hi rakho (jaise mitochondria, enzyme, Newton's law) aur unka matlab Hindi me samjhao.
 - Jawab bolke sunne layak ho: chhote-chhote vaakya, kam symbols. Table, markdown stars, emoji bahut kam use karo, kyunki jawab awaaz me padha jaayega.
 - Formula bolne layak likho, jaise "F barabar m multiply a".
-- Student ka naam/mood dekhkar hausla badhao, par jhoothi tareef mat karo.
+- Student ka hausla badhao, par jhoothi tareef mat karo.
 
 Padhaane ke niyam:
-- Student chapter ka naam bole to us chapter ka NCERT ke flow me poora, topic-wise, detail me samjhao. Lamba chapter ho to 1-2 topic karke poochho "aage badhein?".
+- Student chapter ka naam bole to us chapter ka NCERT ke flow me topic-wise, detail me samjhao. Lamba chapter ho to 1-2 topic karke poochho "aage badhein?".
 - Sirf wahi batao jo tumhe pakka sahi pata ho. Agar kisi number, date ya fact par yakeen nahi hai to saaf bolo ki "yeh ek baar NCERT me verify kar lena". Galat jaankari bilkul mat do.
 - Har explanation ke baad kabhi-kabhi student se ek chhota sawaal pucho.
 - NEET se jude topics, PYQ-style points aur common mistakes zaroor batao.
@@ -42,25 +63,34 @@ ${MODES[mode] || MODES.samjhao}`;
       parts: [{ text: String(m.text).slice(0, 4000) }]
     }));
 
-    const model = env.GEMINI_MODEL || "gemini-2.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents,
-        generationConfig: { temperature: 0.6, maxOutputTokens: 1500 }
-      })
+    const body = JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents,
+      generationConfig: { temperature: 0.6, maxOutputTokens: 1200 }
     });
-    const data = await r.json();
-    if (!r.ok) {
-      return new Response(JSON.stringify({ error: data?.error?.message || "AI se jawab nahi mila." }), { status: 502, headers });
-    }
-    const reply = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
-    return new Response(JSON.stringify({ reply: reply || "Jawab khaali aaya, dobara poochho." }), { headers });
-  } catch (e) {
-    return new Response(JSON.stringify({ error: "Server error: " + e.message }), { status: 500, headers });
-  }
-  }
 
+    // Pehle aapka chuna hua model, phir backup models (busy hone par)
+    const models = [env.GEMINI_MODEL || "gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
+      .filter((m, i, a) => m && a.indexOf(m) === i);
+
+    let lastErr = "AI se jawab nahi mila.";
+    for (const model of models) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await callGemini(model, env.GEMINI_API_KEY, body, 22000);
+        if (res.ok) {
+          const reply = res.data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+          if (reply) return json({ reply });
+          lastErr = "Jawab khaali aaya, dobara poochho.";
+        } else {
+          lastErr = res.data?.error?.message || res.raw.slice(0, 200) || "Unknown error";
+          // 429/503/timeout -> dobara try; baaki errors me agle model par jao
+          if (![0, 429, 500, 503].includes(res.status)) break;
+        }
+        await new Promise(r => setTimeout(r, 800));
+      }
+    }
+    return json({ error: "Abhi AI busy hai, 1 minute baad dobara try karo. (" + lastErr.slice(0, 120) + ")" }, 502);
+  } catch (e) {
+    return json({ error: "Server error: " + e.message }, 500);
+  }
+  }
