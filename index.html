@@ -294,6 +294,24 @@ async function send(){
 $('#send').onclick = send;
 text.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
+// ---------- Hindi (India) voices Google se laao ----------
+(async function loadVoices(){
+  try {
+    const r = await fetch('/voices');
+    if (!r.ok) return;
+    const data = await r.json();
+    const list = (data.voices || []).filter(v => v.id);
+    if (!list.length) return;
+    const sel = $('#voice');
+    const old = sel.innerHTML;
+    sel.innerHTML = '<optgroup label="🇮🇳 Hindi (India) male voices">' +
+      list.map(v => '<option value="' + v.id + '">🎙 ' + v.name +
+        (v.pitch ? ' (' + v.pitch + (v.accent ? ', ' + v.accent : '') + ')' : '') + '</option>').join('') +
+      '</optgroup><optgroup label="Dusri voices">' + old + '</optgroup>';
+    sel.selectedIndex = 0;
+  } catch(e){}
+})();
+
 // ---------- Controls ----------
 $('#voiceToggle').onclick = e => { voiceOn = !voiceOn; e.target.textContent = '🔊 Awaaz: ' + (voiceOn ? 'ON' : 'OFF'); if (!voiceOn) stopSpeaking(); };
 $('#hands').onclick = e => {
