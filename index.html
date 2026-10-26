@@ -21,7 +21,7 @@
   #mic.on{background:#ef4444;color:#fff;animation:p 1s infinite}
   @keyframes p{50%{transform:scale(1.1)}}
   #send{background:var(--me);border:0}
-  #status{font-size:12px;opacity:.8;padding:0 14px 4px;min-height:18px}
+  #status{font-size:12px;opacity:.9;padding:0 14px 4px;min-height:18px}
   .quick{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 6px}
   .quick button{font-size:12px;padding:6px 10px}
 </style>
@@ -58,7 +58,7 @@
   <button data-q="Mujhe is chapter ka pura concept samjhao: ">Chapter samjhao</button>
   <button data-q="Mujhse is chapter ke 5 NEET level sawaal pucho, ek ek karke: ">Quiz lo</button>
   <button data-q="Isko aur simple karke samjhao, example ke saath.">Aur simple</button>
-  <button data-q="Iska short revision notes bana do.">Revision</button>
+  <button data-q="Aage badho.">Aage badho</button>
 </div>
 <div id="status"></div>
 <footer>
@@ -72,8 +72,9 @@ const $ = s => document.querySelector(s);
 const chat = $('#chat'), status = $('#status'), text = $('#text');
 let history = [];
 let voiceOn = true, handsFree = false, listening = false, speaking = false, busy = false;
-let playToken = 0, fellBack = false;
+let playToken = 0, curResolve = null, lastTtsErr = '';
 const audioEl = new Audio();
+audioEl.preload = 'auto';
 
 function addMsg(role, t){
   const d = document.createElement('div');
@@ -93,14 +94,14 @@ function splitText(t){
   const sents = t.match(/[^।.!?\n]+[।.!?\n]?/g) || [t];
   const out = []; let cur = '';
   for (const s of sents){
-    const limit = out.length === 0 ? 160 : 420;   // pehla tukda chhota => awaaz jaldi shuru
+    const limit = out.length === 0 ? 160 : 700;   // pehla tukda chhota => awaaz jaldi shuru
     if (cur && (cur + s).length > limit){ out.push(cur.trim()); cur = s; } else cur += s;
   }
   if (cur.trim()) out.push(cur.trim());
   return out;
 }
 
-// ---------- Gemini voice (server) with browser-voice fallback ----------
+// ---------- Gemini voice (server) ----------
 async function fetchAudio(part){
   try {
     const style = $('#speed').value === 'slow'
@@ -111,16 +112,49 @@ async function fetchAudio(part){
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: part, voice: $('#voice').value, style })
     });
-    if (!r.ok) return null;
-    const b = await r.blob();
-    return URL.createObjectURL(b);
-  } catch(e){ return null; }
+    if (!r.ok){
+      let msg = '';
+      if (r.status === 404) msg = 'tts.js file GitHub me nahi mili (functions/tts.js)';
+      else { try { msg = (await r.json()).error; } catch(e){} }
+      lastTtsErr = msg || ('error ' + r.status);
+      return null;
+    }
+    return await r.arrayBuffer();
+  } catch(e){ lastTtsErr = 'internet problem'; return null; }
 }
-function playUrl(url, token){
+
+// Kai WAV tukde jod kar ek hi audio bana do => beech me pause nahi, screen band hone par bhi chalta rahe
+function wavPcm(b){
+  const v = new DataView(b); let o = 12;
+  while (o + 8 <= b.byteLength){
+    const id = String.fromCharCode(v.getUint8(o), v.getUint8(o+1), v.getUint8(o+2), v.getUint8(o+3));
+    const size = v.getUint32(o + 4, true);
+    if (id === 'data') return new Uint8Array(b, o + 8, Math.min(size, b.byteLength - o - 8));
+    o += 8 + size + (size % 2);
+  }
+  return new Uint8Array(b, 44);
+}
+function mergeWav(buffers){
+  const pcms = buffers.map(wavPcm);
+  const total = pcms.reduce((a, p) => a + p.length, 0);
+  const out = new Uint8Array(44 + total);
+  const dv = new DataView(out.buffer);
+  const w = (o, s) => [...s].forEach((c, i) => dv.setUint8(o + i, c.charCodeAt(0)));
+  w(0,'RIFF'); dv.setUint32(4, 36 + total, true); w(8,'WAVE'); w(12,'fmt ');
+  dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+  dv.setUint32(24,24000,true); dv.setUint32(28,48000,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+  w(36,'data'); dv.setUint32(40, total, true);
+  let p = 44; pcms.forEach(x => { out.set(x, p); p += x.length; });
+  return out;
+}
+function playBytes(bytes){
   return new Promise(res => {
-    audioEl.onended = audioEl.onerror = () => { URL.revokeObjectURL(url); res(); };
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    const done = () => { URL.revokeObjectURL(url); curResolve = null; res(); };
+    curResolve = done;
+    audioEl.onended = audioEl.onerror = done;
     audioEl.src = url;
-    audioEl.play().catch(() => res());
+    audioEl.play().catch(done);
   });
 }
 function browserSpeak(t){
@@ -134,11 +168,26 @@ function browserSpeak(t){
     speechSynthesis.speak(u);
   });
 }
+function setMedia(){
+  try {
+    if ('mediaSession' in navigator){
+      navigator.mediaSession.metadata = new MediaMetadata({ title: 'NEET Guru', artist: 'Aapka Teacher' });
+      navigator.mediaSession.setActionHandler('pause', () => stopSpeaking());
+    }
+  } catch(e){}
+}
 function stopSpeaking(){
   playToken++;
   try { audioEl.pause(); } catch(e){}
+  if (curResolve) curResolve();
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   speaking = false; status.textContent = '';
+}
+function finishSpeaking(token){
+  if (token !== playToken) return;
+  speaking = false;
+  if (!status.textContent.startsWith('⚠️')) status.textContent = '';
+  if (handsFree) startListen();
 }
 async function speakReply(reply){
   if (!voiceOn){ if (handsFree) startListen(); return; }
@@ -146,21 +195,35 @@ async function speakReply(reply){
   const parts = splitText(cleanForSpeech(reply));
   if (!parts.length){ if (handsFree) startListen(); return; }
   speaking = true; status.textContent = '🔊 Awaaz taiyaar ho rahi hai...';
-  let next = fetchAudio(parts[0]);
-  for (let i = 0; i < parts.length; i++){
-    const url = await next;
-    if (token !== playToken) return;
-    if (i + 1 < parts.length) next = fetchAudio(parts[i + 1]); // agla tukda pehle se bana lo => beech me ruk nahi
-    status.textContent = '🔊 Bol raha hu...';
-    if (url){ await playUrl(url, token); }
+  const jobs = parts.map(p => fetchAudio(p));   // sabhi tukde ek saath bante hain
+  const first = await jobs[0];
+  if (token !== playToken) return;
+
+  if (!first){
+    status.textContent = '⚠️ Gemini awaaz nahi chali (' + lastTtsErr + '). Phone ki awaaz chal rahi hai.';
+    for (const p of parts){ if (token !== playToken) return; await browserSpeak(p); }
+    return finishSpeaking(token);
+  }
+  setMedia();
+  status.textContent = '🔊 Bol raha hu...';
+  const rest = Promise.all(jobs.slice(1));
+  await playBytes(first);
+  if (token !== playToken) return;
+
+  const bufs = await rest;
+  if (token !== playToken) return;
+  let group = [];
+  for (let i = 0; i < bufs.length; i++){
+    if (bufs[i]) group.push(bufs[i]);
     else {
-      if (!fellBack){ fellBack = true; status.textContent = '⚠️ Gemini awaaz abhi busy, phone ki awaaz use ho rahi hai'; }
-      await browserSpeak(parts[i]);
+      if (group.length){ await playBytes(mergeWav(group)); group = []; }
+      if (token !== playToken) return;
+      await browserSpeak(parts[i + 1]);
     }
     if (token !== playToken) return;
   }
-  speaking = false; status.textContent = '';
-  if (handsFree) startListen();
+  if (group.length) await playBytes(mergeWav(group));
+  finishSpeaking(token);
 }
 
 // ---------- Speech to Text (Hindi) ----------
@@ -216,12 +279,13 @@ async function send(){
     const isErr = !data.reply;
     const reply = data.reply || ('⚠️ ' + (data.error || 'Kuch gadbad hui, dobara try karo.'));
     holder.textContent = reply;
+    chat.scrollTop = chat.scrollHeight;
     busy = false; status.textContent = '';
     if (!isErr){
       history.push({ role: 'model', text: reply });
       speakReply(reply);
     } else {
-      history.pop(); // galat sawaal history se hata do
+      history.pop();
     }
   } catch (e){
     busy = false; holder.textContent = '⚠️ Internet ya server ki problem. Dobara try karo.'; status.textContent = '';
@@ -240,5 +304,4 @@ $('#stop').onclick = () => stopSpeaking();
 document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { text.value = b.dataset.q; text.focus(); });
 </script>
 </body>
-  </html>
-  
+</html>
