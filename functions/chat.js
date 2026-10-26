@@ -2,10 +2,10 @@
 // API key yahan nahi likhni. Cloudflare me GEMINI_API_KEY naam se secret daalna hai.
 
 const MODES = {
-  samjhao: "Teacher mode: topic ko shuru se, step by step, detail me samjhao. Pehle simple intuition, phir concept, phir daily-life example, phir NEET me kya aata hai (important facts, formulas, exceptions, common galtiyan). End me ek chhota sawaal pucho taaki student ki understanding check ho.",
+  samjhao: "Teacher mode: topic ko step by step samjhao. Pehle simple intuition, phir concept, phir ek daily-life example, phir NEET me kya aata hai (important fact, formula, exception, common galti). End me ek chhota sawaal pucho taaki student ki understanding check ho.",
   quiz: "Quiz mode: student se NEET level MCQ pucho, EK baar me sirf EK sawaal, 4 options ke saath. Student ka jawab aane par bataao sahi hai ya galat, kyun, aur concept samjhao. Phir agla sawaal.",
   doubt: "Doubt mode: student ka doubt dhyan se suno, jahan atka hai wahi se samjhao. Seedha aur clear jawab do, phir confirm karo ki samajh aaya ya nahi.",
-  revision: "Revision mode: topic ke short, point-wise high-yield notes do, important formulas/facts/mnemonics ke saath, jo NEET ke last-minute revision me kaam aayein."
+  revision: "Revision mode: topic ke short, high-yield points do, important formulas/facts/mnemonics ke saath, jo NEET ke last-minute revision me kaam aayein."
 };
 
 const json = (obj, status = 200) =>
@@ -43,16 +43,18 @@ Student ki class: ${cls}, subject: ${sub}.
 Syllabus: NCERT Class 11 aur 12 (Physics, Chemistry, Biology — Botany + Zoology) ke hisaab se, NEET ke official syllabus ke andar.
 
 Bhasha ke niyam:
-- Jawab hamesha DEVANAGARI lipi me (हिन्दी में) likho, kyunki jawab awaaz me padha jaayega aur Devanagari se uchcharan saaf aata hai. Roman/Hinglish me mat likho.
-- Bhasha simple, bol-chaal wali ho, jaise ek dost samjha raha ho. Bhaari shuddh Hindi mat use karo (jaise "इसलिए", "मतलब", "देखो" jaise aam shabd use karo).
+- Jawab hamesha DEVANAGARI lipi me (हिन्दी में) likho, kyunki jawab awaaz me padha jaayega aur Devanagari se uchcharan saaf aata hai. Roman/Hinglish me bilkul mat likho.
+- Bhasha simple, bol-chaal wali ho, jaise ek dost samjha raha ho. Bhaari shuddh Hindi mat use karo.
 - Technical terms English me hi rakho aur English letters me hi likho (jaise mitochondria, enzyme, velocity, Newton's law), aur unka matlab Hindi me samjhao.
 - Chhote-chhote vaakya likho, har vaakya ke ant me poorn viram (।) lagao. Table, markdown stars, bullet symbols aur emoji bilkul mat use karo, kyunki jawab awaaz me padha jaayega.
 - Formula bolne layak likho, jaise "F बराबर m गुणा a".
-- Student ka hausla badhao, par jhoothi tareef mat karo.
+
+Lambai ke niyam (bahut zaroori):
+- Ek jawab me zyada se zyada 150 se 200 shabd (lagbhag 8 se 10 vaakya) likho. Ek baar me sirf ek chhota topic samjhao, phir poochho "आगे बढ़ें?". Student maange to hi lamba jawab do.
 
 Padhaane ke niyam:
-- Student chapter ka naam bole to us chapter ka NCERT ke flow me topic-wise, detail me samjhao. Lamba chapter ho to 1-2 topic karke poochho "aage badhein?".
-- Sirf wahi batao jo tumhe pakka sahi pata ho. Agar kisi number, date ya fact par yakeen nahi hai to saaf bolo ki "yeh ek baar NCERT me verify kar lena". Galat jaankari bilkul mat do.
+- Student chapter ka naam bole to NCERT ke flow me pehle topic se shuru karo, ek-ek topic karke aage badho.
+- Sirf wahi batao jo tumhe pakka sahi pata ho. Agar kisi number, date ya fact par yakeen nahi hai to saaf bolo ki "ये एक बार NCERT में verify कर लेना"। Galat jaankari bilkul mat do.
 - Har explanation ke baad kabhi-kabhi student se ek chhota sawaal pucho.
 - NEET se jude topics, PYQ-style points aur common mistakes zaroor batao.
 - Agar sawaal NEET/padhai se bahar ka ho to pyaar se wapas padhai par laao.
@@ -64,27 +66,35 @@ ${MODES[mode] || MODES.samjhao}`;
       parts: [{ text: String(m.text).slice(0, 4000) }]
     }));
 
-    const body = JSON.stringify({
+    const makeBody = (withThinking) => JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents,
-      generationConfig: { temperature: 0.6, maxOutputTokens: 1200 }
+      generationConfig: {
+        temperature: 0.6,
+        maxOutputTokens: 900,
+        ...(withThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {})
+      }
     });
 
-    // Pehle aapka chuna hua model, phir backup models (busy hone par)
     const models = [env.GEMINI_MODEL || "gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"]
       .filter((m, i, a) => m && a.indexOf(m) === i);
 
     let lastErr = "AI se jawab nahi mila.";
     for (const model of models) {
+      let useThinking = true;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const res = await callGemini(model, env.GEMINI_API_KEY, body, 22000);
+        let res = await callGemini(model, env.GEMINI_API_KEY, makeBody(useThinking), 22000);
+        // Agar model "thinking" setting nahi samajhta (400), to bina uske dobara try karo
+        if (!res.ok && res.status === 400 && useThinking) {
+          useThinking = false;
+          res = await callGemini(model, env.GEMINI_API_KEY, makeBody(false), 22000);
+        }
         if (res.ok) {
-          const reply = res.data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+          const reply = res.data?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
           if (reply) return json({ reply });
           lastErr = "Jawab khaali aaya, dobara poochho.";
         } else {
           lastErr = res.data?.error?.message || res.raw.slice(0, 200) || "Unknown error";
-          // 429/503/timeout -> dobara try; baaki errors me agle model par jao
           if (![0, 429, 500, 503].includes(res.status)) break;
         }
         await new Promise(r => setTimeout(r, 800));
@@ -94,4 +104,4 @@ ${MODES[mode] || MODES.samjhao}`;
   } catch (e) {
     return json({ error: "Server error: " + e.message }, 500);
   }
-}
+                 }
